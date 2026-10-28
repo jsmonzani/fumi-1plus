@@ -9,6 +9,9 @@
  *   LFO ビブラート   ARP トリラー   GLO 単音/和音 (hold: the trill pages)   SEL 調律 (tap: 平均律 / 純正律; hold: the tuning page)
  *   OCT- / OCT+    a note held: pitch bend down / up (sprung); none held: octave down / up
  *   HOME FX EDIT   the pages: HOME, SOUND, BEND.  ENV: the LOOP page.  SAVE saves (and it autosaves when quiet)
+ *   SEQ            tap (< 0.5 s): the black keys switch between the upper row and the ornaments.  Held: Pick layer,
+ *                  for as long as it is held: the black keys switch the looper's layers on and off (the first
+ *                  black key is layer 1), their LEDs show the layers that sound; the ornaments are not touched
  *   REC            the looper (fumi.h): tap: arm (the first key starts the loop) / close / overdub on, off;
  *                  held 1 s: clear.   PLAY  tap: stop / start from the top; held 1 s: undo the top layer
  *   OCT- + OCT+ held 5 s: update mode (main_fm1.c; never reassigned) */
@@ -26,6 +29,7 @@ static const uint8_t VIEW_KNOB[NVIEWS][4] = {
     {P_TRILL_FIRST, P_TRILL_JIT, K_NONE, K_NONE},             /* GLO held again: the second page */
 };
 #define HOLD_MS 1000u                              /* REC / PLAY held this long: clear / undo */
+#define PICK_MS 500u                               /* SEQ held longer than this: Pick layer (a tap is shorter) */
 
 static const uint8_t WHITE_K[FM_NWHITE] = {0, 2, 4, 6, 7, 9, 11, 12, 14, 16, 18, 19, 21, 23, 24, 26};
 static const uint8_t BLACK_K[FM_NBLACK] = {1, 3, 5, 8, 10, 13, 15, 17, 20, 22, 25};
@@ -53,6 +57,9 @@ static struct {
     uint32_t sel_t;                    /* SEL pressed at (its hold opens the tuning page) */
     uint32_t glo_t;                    /* GLO pressed at (its hold opens the trill pages) */
     uint32_t hold_t[2];                /* REC, PLAY pressed at (held: clear, undo) */
+    uint32_t seq_t;                    /* SEQ pressed at (its hold is Pick layer) */
+    uint16_t swallow;                  /* black keys whose press was Pick layer's: their release is not a key-up */
+    uint8_t pick;                      /* Pick layer: SEQ is held, the black keys pick layers */
     uint8_t oct_role[2];               /* OCT- / OCT+ while held: 0 up, 1 bend, 2 octave */
     uint8_t tuning_prev;               /* the 純正律 to come back to after a tap to 平均律 */
     uint8_t dirty;
@@ -312,14 +319,51 @@ static void midi_in(void)
     }
 }
 
+static void layer_pick(int b)                      /* Pick layer: black key b switches layer b + 1 */
+{
+    char t[16] = "LAYER ";
+    if ((uint32_t)b >= (uint32_t)fm_loop_layers) {
+        say("NO LAYER", 0);
+        return;
+    }
+    itoa_u((uint32_t)b + 1u, t + 6);
+    say(t, (fm_loop_layer_mask >> b & 1u) ? "OFF" : "ON");   /* what it becomes: the engine does it in a block's time */
+    fm_loop_layer_toggle(b + 1);
+}
+
 static void black_key(int b, int on)
 {
+    if (ui.pick) {                                 /* Pick layer: a black key is a layer's switch, not a note */
+        if (on) {
+            ui.swallow |= (uint16_t)(1u << b);
+            layer_pick(b);
+        } else {
+            ui.swallow &= (uint16_t)~(1u << b);
+        }
+        return;
+    }
+    if (!on && (ui.swallow >> b & 1u)) {           /* it was pressed for Pick layer: nothing to let go */
+        ui.swallow &= (uint16_t)~(1u << b);
+        return;
+    }
     if (proj.par[P_BLACK]) {
         if (BLACK_ORN[b] < ORN_N)
             fm_ornament(BLACK_ORN[b], on);
     } else {
         fm_key(FM_NWHITE + b, on);
     }
+}
+
+static void pick_enter(void)                       /* SEQ held: the black keys now held let go of what they did, then pick */
+{
+    int b;
+    for (b = 0; b < FM_NBLACK; b++)
+        if (ui.keys >> BLACK_K[b] & 1u) {
+            black_key(b, 0);
+            ui.swallow |= (uint16_t)(1u << b);     /* their release is not taken for a key-up */
+        }
+    ui.pick = 1;
+    say("PICK LAYER", "BLACK KEYS");
 }
 
 static void input(void)
@@ -348,6 +392,8 @@ static void input(void)
                 ui.sel_t = plat_ms();
             else if (i == B_GLO)
                 ui.glo_t = plat_ms();
+            else if (i == B_SEQ)
+                ui.seq_t = plat_ms();
             else if (i == B_REC || i == B_PLAY)
                 ui.hold_t[i == B_PLAY] = plat_ms();
         } else if (i == B_OCTDN || i == B_OCTUP) {
@@ -364,6 +410,12 @@ static void input(void)
         ui.btn_used |= 1u << B_GLO;                /* GLO held: the trill page; held again: its second page */
         set_view(ui.view == V_TRILL ? V_TRILL2 : V_TRILL);
     }
+    if ((btn >> B_SEQ & 1u) && !(ui.btn_used >> B_SEQ & 1u) && plat_ms() - ui.seq_t > PICK_MS) {
+        ui.btn_used |= 1u << B_SEQ;                /* SEQ held: Pick layer, no ornament switch on release */
+        pick_enter();
+    }
+    if (ui.pick && !(btn >> B_SEQ & 1u))
+        ui.pick = 0;                               /* SEQ let go: Pick layer ends */
     loop_hold(0, plat_ms());
     loop_hold(1, plat_ms());
     if (btn || keys || ch)
@@ -677,10 +729,15 @@ static void leds(void)
         for (i = 0; i < FM_NWHITE; i++)
             if (fm_key_level[i] > 0.15f || (i % 5) == 0)   /* the tonics: landmarks, always lit */
                 k |= 1u << WHITE_K[i];
-        for (i = 0; i < FM_NBLACK; i++)
-            if (fm_key_level[FM_NWHITE + i] > 0.15f)
-                k |= 1u << BLACK_K[i];
+        if (!ui.pick)
+            for (i = 0; i < FM_NBLACK; i++)
+                if (fm_key_level[FM_NWHITE + i] > 0.15f)
+                    k |= 1u << BLACK_K[i];
     }
+    if (ui.pick)                                   /* Pick layer: a black key's LED is lit while its layer sounds */
+        for (i = 0; i < FM_NBLACK && i < 32u; i++)
+            if (fm_loop_layer_mask >> i & 1u)
+                k |= 1u << BLACK_K[i];
     plat_glow(proj.leds == 1);
     plat_leds(b, k);
 }

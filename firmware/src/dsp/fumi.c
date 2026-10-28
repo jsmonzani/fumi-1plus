@@ -133,11 +133,12 @@ void fm_note_vel(int id, int on, float cents, int vel)   /* b: bit 0 on, bits 1.
 void fm_ornament(int orn, int on) { post(C_ORN, orn, on, 0.0f); }
 void fm_bend(int which, int down, int note_held) { post(C_BEND, which, down | note_held << 1, 0.0f); }
 void fm_panic(void) { post(C_PANIC, 0, 0, 0.0f); }
-enum { LC_REC, LC_PLAY, LC_UNDO, LC_CLEAR };
+enum { LC_REC, LC_PLAY, LC_UNDO, LC_CLEAR, LC_LAYER };
 void fm_loop_rec(void) { post(C_LOOP, LC_REC, 0, 0.0f); }
 void fm_loop_play(void) { post(C_LOOP, LC_PLAY, 0, 0.0f); }
 void fm_loop_undo(void) { post(C_LOOP, LC_UNDO, 0, 0.0f); }
 void fm_loop_clear(void) { post(C_LOOP, LC_CLEAR, 0, 0.0f); }
+void fm_loop_layer_toggle(int layer) { post(C_LOOP, LC_LAYER, layer, 0.0f); }   /* layer 1..: sounds <-> silent */
 
 /* the patch: the main loop writes the pending record and bumps the generation; the render adopts it */
 static uint8_t patch_pending[FM6_PACKED];
@@ -203,6 +204,7 @@ typedef struct {
     uint8_t hiki, ato;                            /* plucked under 引き色 / 後押し: the dip, the push */
     uint8_t down, live, vel;
     uint8_t slot;                                 /* the patch it plays (ps) */
+    uint8_t ch;                                   /* its MIDI out channel, 0..15: the hands' notes 0, a loop layer's its own */
     uint32_t order;
 } voice_t;
 static voice_t vc[FM_NVOICE];
@@ -212,6 +214,8 @@ static bend_t lp_bend;                            /* the loop's own bend, on its
 static int lp_bend_voice = -1;
 #define LP_ID0 256                                /* the loop's notes: voice ids LP_ID0 + key */
 static int lp_key_of(int id) { return id >= LP_ID0 && id < LP_ID0 + FM_NKEY ? id - LP_ID0 : -1; }
+#define LP_NOCH 0xFFu
+static uint8_t lp_play_ch = LP_NOCH;              /* the MIDI channel of the layer whose event lp_play_ev is playing; LP_NOCH: none */
 
 static int held[64], nheld;                       /* keys down, in press order (the mono / slide stack) */
 static int lp_held[FM_NKEY], lp_nheld;            /* the loop's keys down, in press order (its trill's note) */
@@ -234,6 +238,7 @@ typedef struct {
     int id;                                       /* the group's last stroke: its note, pitch and instrument, so a key whose */
     float base, next_up;                          /* sound has ended by itself (a hyoshigi's crack) can be struck again (1.0.7) */
     uint8_t slot;
+    uint8_t ch;                                   /* the loop group's last stroke's MIDI channel (its layer's) */
 } trill_t;
 static trill_t tr[2];
 static float trill_period;
@@ -395,6 +400,7 @@ static void oroshi_start(int g)                   /* the ornament key: from abou
 }
 
 static void pluck_vel(int i, int id, float cents, float next_up, int fresh, int slot, int vel, float trim);
+static void midi_off(const voice_t *v);
 static float hand_shape(const voice_t *v);
 /* (re)start voice i on pitch `cents` (from A4) for key id; fresh = from silence. A press (press = 1) is strong
  * while the trill is on (the first KA) or under the strong-pluck ornament, else normal; mono's return to the key
@@ -428,8 +434,14 @@ static void pluck_vel(int i, int id, float cents, float next_up, int fresh, int 
     voice_t *v = &vc[i];
     /* the nearest MIDI note of the pitch: the FM6 core's keyboard level and rate scaling and its detune curve
      * are set from it at note-on, as on the DX7 (the pitch itself comes from the cents, per block) */
-    int mn = (int)fm_floorf((cents + 6900.0f) * 0.01f + 0.5f);
+    int mn = (int)fm_floorf((cents + 6900.0f) * 0.01f + 0.5f), ch = 0;
     mn = mn < 0 ? 0 : mn > 127 ? 127 : mn;
+    if (lp_key_of(id) >= 0) {                      /* a loop note goes out on its layer's channel; the trill's re-pluck */
+        ch = lp_play_ch != LP_NOCH ? lp_play_ch    /* (no layer event now) keeps the channel of the stroke before */
+           : (v->live && v->id == id) ? v->ch : tr[1].ch;
+        if (v->live && v->down && lp_key_of(v->id) >= 0)
+            midi_off(v);                           /* re-struck or stolen while down: its MIDI note closes first */
+    }
     if (fresh) {
         v->dc = 0.0f;
         v->g = 0.0f;
@@ -451,8 +463,10 @@ static void pluck_vel(int i, int id, float cents, float next_up, int fresh, int 
     v->trim = trim;
     v->order = ++order_n;
     v->slot = (uint8_t)slot;
+    v->ch = (uint8_t)ch;
     {
         trill_t *t = &tr[group_of(id)];
+        t->ch = (uint8_t)ch;
         t->id = id;
         t->base = cents;
         t->next_up = next_up;
@@ -465,9 +479,9 @@ static void pluck_vel(int i, int id, float cents, float next_up, int fresh, int 
     else
         bend_voice = i;
     bend_targets();
-    if (par[P_MIDI_OUT] && id < FM_NKEY) {
+    if (par[P_MIDI_OUT] && (id < FM_NKEY || lp_key_of(id) >= 0)) {   /* the keys on channel 1; a loop layer's notes on its own */
         int m = (int)fm_floorf((cents + 6900.0f) * 0.01f + 0.5f);
-        fm_midi_out(0x90, (uint32_t)(m < 0 ? 0 : m > 127 ? 127 : m), (uint32_t)vel);
+        fm_midi_out(0x90u | (uint32_t)ch, (uint32_t)(m < 0 ? 0 : m > 127 ? 127 : m), (uint32_t)vel);
     }
 }
 
@@ -491,9 +505,9 @@ static void slide_to(int i, int id, float cents, float next_up)
 static void midi_off(const voice_t *v)            /* the note-off for a key's voice: at the key-up, or when its sound
                                                      ended by itself with the key still down (a hyoshigi's crack) */
 {
-    if (par[P_MIDI_OUT] && v->id < FM_NKEY) {
+    if (par[P_MIDI_OUT] && (v->id < FM_NKEY || lp_key_of(v->id) >= 0)) {
         int m = (int)fm_floorf((v->base + 6900.0f) * 0.01f + 0.5f);
-        fm_midi_out(0x80, (uint32_t)(m < 0 ? 0 : m > 127 ? 127 : m), 0);
+        fm_midi_out(0x80u | (uint32_t)v->ch, (uint32_t)(m < 0 ? 0 : m > 127 ? 127 : m), 0);
     }
 }
 static void release(int i)
@@ -599,6 +613,7 @@ static void all_off(void)
         release(i);
 }
 
+static void midi_all_off(void);
 static void quiet(void)
 {
     int i;
@@ -613,7 +628,7 @@ static void quiet(void)
     bend_init(&lp_bend);
     bend_targets();
     if (par[P_MIDI_OUT])
-        fm_midi_out(0xB0, 123, 0);
+        midi_all_off();
 }
 
 static void ornament(int o, int on, int g)        /* g: 0 the hands' notes, 1 the loop's */
@@ -631,7 +646,7 @@ static void ornament(int o, int on, int g)        /* g: 0 the hands' notes, 1 th
 
 /* -------------------------------------------------------------- looper --- */
 /* Events are kept in time order, block times from the loop's start. The loop's notes are voices of their own
- * (ids LP_ID0 + key: lit like the key, retuned like it, no MIDI out), outside the mono / slide stack and the
+ * (ids LP_ID0 + key: lit like the key, retuned like it, MIDI out on its layer's channel), outside the mono / slide stack and the
  * trill, with a bend of their own; so a loop plays under whatever the hands do. An event recorded while the
  * loop plays is marked fresh: it sounds live already and is skipped once, then plays from the next pass. A
  * release is recorded for whatever a layer still has down when it ends, so nothing drones. */
@@ -643,6 +658,8 @@ typedef struct {
 } lp_ev_t;
 static lp_ev_t lp_ev[LP_NEV] FM_POOL;
 static uint32_t lp_n, lp_len, lp_pos, lp_next, lp_max, lp_keys_down, lp_other_down, lp_orn_on;
+static uint32_t lp_off[8];                        /* the layers switched off, one bit a layer (1..255); all on by default */
+volatile uint32_t fm_loop_layer_mask;             /* the layers that exist and are on: bit n is layer n + 1 (the first 32) */
 #define LP_ROOM 36u                               /* a press is taken only with room for every release: 27 keys, 7 ornaments, 2 bends */
 static uint8_t lp_state, lp_layer, lp_click_on;
 volatile uint32_t fm_loop_gen;                    /* the loop's content changed (fm_loop_image / the app's save) */
@@ -653,6 +670,24 @@ static int lp_slot_of(uint8_t layer) { return lp_lslot[layer] == LP_NOSLOT ? 0 :
 static float lp_beat, lp_click_at, lp_click_ph, lp_click_inc, lp_click_g;
 volatile uint8_t fm_loop_state, fm_loop_layers;
 volatile uint32_t fm_loop_pos, fm_loop_len, fm_loop_events;
+
+/* MIDI out: the loop's layers each have a channel (layer 1 -> channel 1 ...), 16 at most: past the sixteenth they wrap */
+static uint8_t lp_ch_of(uint32_t layer) { return (uint8_t)((layer ? layer - 1u : 0u) & 15u); }
+static void midi_all_off(void)                    /* all notes off, on every channel in use: the hands' and the layers' */
+{
+    uint32_t c, n = lp_layer < 16u ? lp_layer : 16u;
+    fm_midi_out(0xB0, 123, 0);
+    for (c = 1; c < n; c++)
+        fm_midi_out(0xB0u | c, 123, 0);
+}
+static int lp_layer_on(uint32_t layer) { return !(lp_off[(layer >> 5) & 7u] >> (layer & 31u) & 1u); }
+static void lp_layer_enable(uint32_t layer) { lp_off[(layer >> 5) & 7u] &= ~(1u << (layer & 31u)); }
+static void lp_layers_reset(void)                 /* a new loop, a cleared one, a restored one: every layer on */
+{
+    uint32_t k;
+    for (k = 0; k < 8u; k++)
+        lp_off[k] = 0;
+}
 
 static void lp_release_notes(void)                /* the loop's sounding notes let go (stop, clear, undo) */
 {
@@ -683,6 +718,57 @@ static void lp_quiet(void)                       /* stop, undo, clear: what the 
     lp_bend_voice = -1;
     bend_init(&lp_bend);
     bend_targets();
+}
+
+/* A layer switched off lets go of what it has down at this point of the pass (its events before lp_next): its keys,
+ * its ornaments, its bend, unless a layer still on has them down too. What it will do later in the pass is skipped
+ * by lp_block. Switched on again, it plays from its next event: a note it started before stays silent till the pass
+ * comes round. */
+static void lp_layer_mute(uint32_t layer)
+{
+    uint32_t k, mk = 0, mo = 0, ok = 0, oo = 0;    /* down: the muted layer's keys, ornaments + bends (bit 8 up); the others' */
+    for (k = 0; k < lp_next && k < lp_n; k++) {
+        const lp_ev_t *e = &lp_ev[k];
+        int mine = e->layer == layer;
+        uint32_t *kd = mine ? &mk : &ok, *od = mine ? &mo : &oo;
+        if (!mine && !lp_layer_on(e->layer))
+            continue;
+        switch (e->c & 0x7Fu) {
+        case C_KEY: *kd = e->b ? *kd | 1u << e->a : *kd & ~(1u << e->a); break;
+        case C_ORN: *od = e->b ? *od | 1u << e->a : *od & ~(1u << e->a); break;
+        case C_BEND: *od = (e->b & 1u) ? *od | 1u << (8u + e->a) : *od & ~(1u << (8u + e->a)); break;
+        default: break;
+        }
+    }
+    mk &= ~ok;
+    mo &= ~oo;
+    for (k = 0; k < FM_NKEY; k++)
+        if (mk >> k & 1u) {
+            int i = find_voice(LP_ID0 + (int)k);
+            if (i >= 0)
+                release(i);
+            lp_held_set((int)k, 0);
+        }
+    for (k = 0; k < ORN_N; k++)
+        if (mo >> k & 1u) {
+            lp_orn_on &= ~(1u << k);
+            ornament((int)k, 0, 1);
+        }
+    for (k = 0; k < 2u; k++)
+        if (mo >> (8u + k) & 1u)
+            bend_button(&lp_bend, (int)k, 0, 0, ms_count);
+}
+
+static void lp_layer_toggle(uint32_t layer)      /* layer 1..lp_layer: on <-> off */
+{
+    if (layer == 0 || layer > lp_layer)
+        return;
+    if (lp_layer_on(layer)) {
+        lp_off[(layer >> 5) & 7u] |= 1u << (layer & 31u);
+        lp_layer_mute(layer);
+    } else {
+        lp_layer_enable(layer);
+    }
 }
 
 static int lp_slot_take(void)                     /* a slot holding the current instrument, for the layer starting now */
@@ -731,12 +817,14 @@ static void lp_play_ev(const lp_ev_t *e)
         lp_held_set(e->a, e->b);
         if (e->b) {
             float nu, cents = key_cents(e->a, &nu);
+            lp_play_ch = lp_ch_of(e->layer);       /* the note's MIDI channel is its layer's */
             if (i >= 0) {
                 pluck(i, id, cents, nu, 0, slot);
             } else {
                 i = alloc_voice();
                 pluck(i, id, cents, nu, !vc[i].live, slot);
             }
+            lp_play_ch = LP_NOCH;
         } else if (i >= 0) {
             release(i);
         }
@@ -823,6 +911,7 @@ static void lp_clear(void)
         fm_loop_gen++;
     lp_n = lp_len = lp_pos = lp_next = lp_keys_down = lp_other_down = 0;
     lp_layer = 0;
+    lp_layers_reset();
     lp_state = LP_IDLE;
     lp_release_notes();
     lp_quiet();
@@ -837,7 +926,7 @@ static void lp_dub_off(void)
     fm_loop_gen++;
 }
 
-static void lp_cmd(int what)
+static void lp_cmd(int what, int arg)
 {
     switch (what) {
     case LC_REC:
@@ -848,6 +937,7 @@ static void lp_cmd(int what)
         case LP_PLAY: case LP_STOP:
             if (lp_layer < 255u)
                 lp_layer++;
+            lp_layer_enable(lp_layer);            /* a new layer sounds */
             lp_lslot[lp_layer] = LP_NOSLOT;
             if (lp_state == LP_STOP) {
                 lp_pos = lp_next = 0;
@@ -910,6 +1000,7 @@ static void lp_cmd(int what)
         break;
     }
     case LC_CLEAR: lp_clear(); break;
+    case LC_LAYER: lp_layer_toggle((uint32_t)arg & 0xFFu); break;
     default: break;
     }
 }
@@ -921,6 +1012,7 @@ static void lp_record(uint32_t c, int a, int b)   /* drain: an input while the l
             return;
         lp_pos = lp_next = 0;                     /* the first key is the loop's start */
         lp_layer = 1;
+        lp_layer_enable(1);
         lp_lslot[1] = LP_NOSLOT;
         lp_click_at = 0.0f;
         lp_state = LP_REC;
@@ -958,8 +1050,9 @@ static void lp_block(void)                        /* every block, before the voi
             lp_ev_t *e = &lp_ev[lp_next++];
             int fresh = (e->c & LP_FRESH) != 0;
             e->c &= (uint8_t)~LP_FRESH;
-            if (!fresh || !lp_is_press(e))       /* a press recorded just now sounds live already; a release
-                                                  * may be for a copy the loop started a pass ago */
+            if ((!fresh || !lp_is_press(e)) && lp_layer_on(e->layer))   /* a press recorded just now sounds live
+                                                  * already; a release may be for a copy the loop started a pass
+                                                  * ago; a layer switched off plays nothing */
                 lp_play_ev(e);
         }
         if (++lp_pos >= lp_len) {
@@ -981,6 +1074,13 @@ static void lp_block(void)                        /* every block, before the voi
         lp_click_inc = (one ? 2000.0f : 1500.0f) / FM_SR;
         lp_click_ph = 0.0f;
         lp_click_at += lp_beat;
+    }
+    {
+        uint32_t k, n = lp_layer < 32u ? lp_layer : 32u, m = 0;
+        for (k = 1; k <= n; k++)
+            if (lp_layer_on(k))
+                m |= 1u << (k - 1u);
+        fm_loop_layer_mask = m;
     }
     fm_loop_state = lp_state;
     fm_loop_layers = lp_layer;
@@ -1108,6 +1208,7 @@ int fm_loop_restore(const uint8_t *src, uint32_t n)
     lp_len = len;
     lp_layer = (uint8_t)layers;
     lp_pos = lp_next = lp_keys_down = lp_other_down = 0;
+    lp_layers_reset();                             /* (the image does not keep which layers were off) */
     lp_click_at = 0.0f;
     BARRIER();
     lp_state = nev ? LP_STOP : LP_IDLE;
@@ -1186,7 +1287,7 @@ static void apply(int p, int v)
     case P_REV_SIZE: plate_size((float)v * 0.01f); break;
     case P_MIDI_OUT:
         if (!v)
-            fm_midi_out(0xB0, 123, 0);
+            midi_all_off();
         break;
     case P_LOOP_BPM: case P_LOOP_BEATS: case P_LOOP_CLICK: lp_ruler(); break;
     default:
@@ -1216,6 +1317,7 @@ void fm_init(void)
         smooth_init(&vc[i].pitch, 12.0f, 0.0f, BLK_MS);
         vc[i].sliding = 0;
         vc[i].slot = 0;
+        vc[i].ch = 0;
         vc[i].trim = 1.0f;
     }
     for (i = 0; i <= LP_NPAT; i++)
@@ -1238,6 +1340,10 @@ void fm_init(void)
     lp_n = lp_len = lp_pos = lp_next = lp_keys_down = lp_other_down = lp_orn_on = 0;
     lp_state = LP_IDLE;
     lp_layer = 0;
+    lp_layers_reset();
+    fm_loop_layer_mask = 0;
+    lp_play_ch = LP_NOCH;
+    tr[0].ch = tr[1].ch = 0;
     lp_click_g = lp_click_ph = lp_click_at = 0.0f;
     ms_count = 0;
     ms_acc = 0.0f;
@@ -1297,7 +1403,7 @@ static void drain(void)
             }
             break;
         case C_PANIC: quiet(); break;
-        case C_LOOP: lp_cmd(c.a); lp_busy = 0; break;
+        case C_LOOP: lp_cmd(c.a, c.b); lp_busy = 0; break;
         case C_PATCH:
             if (patch_seen != patch_gen) {
                 patch_seen = patch_gen;

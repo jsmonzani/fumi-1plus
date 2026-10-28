@@ -6,7 +6,11 @@ While playing with FuMi, I found myself wanting to switch on / off the various l
 
 Similarly, I really wanted a MIDI out on the looper (each layer on its MIDI channel). 
 
+**Install at your own risk, I take not responsibility if something goes wrong.** Tested on real hardware, works as expected.
+
 The rest is the original documentation. 
+
+
 
 # FuMi-1 for the M-VAVE FM-1
 

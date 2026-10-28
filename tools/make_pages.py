@@ -27,7 +27,7 @@ SRC = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SRC / "web"))
 from make_site import product_of, strip_module  # noqa: E402  (Felucca's: the package format)
 
-REPO = "https://github.com/cartesive/fumi-1"
+REPO = "https://github.com/jsmonzani/fumi-1plus"
 SF_VERSION = "1.0.8"                         # the latest release that carries a SoundFont (docs/soundfont.md): a released
                                              # file is frozen, and a version without a new render links the last one
 
@@ -37,7 +37,7 @@ LANDING = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FuMi-1</title>
-<meta name="description" content="FuMi-1: custom firmware for the M-VAVE FM-1 inspired by the Suiko ST-50 shigin conductor. Koto, flutes and a drum in the ST-50's tuning; play it in the browser or install it.">
+<meta name="description" content="FuMi-1plus: custom firmware for the M-VAVE FM-1 inspired by the Suiko ST-50 shigin conductor. Koto, flutes and a drum in the ST-50's tuning; play it in the browser or install it.">
 <style>
 :root { --ground: #faf4e8; --ink: #3b2f28; --muted: #8a7764; --rule: #e6dccb; --accent: #c44830; --card: #fffaf1; color-scheme: light; }
 @media (prefers-color-scheme: dark) {
@@ -69,7 +69,11 @@ ul.pages li { margin: 0 0 .4rem; }
 </head>
 <body>
 <main>
-<h1>FuMi-1 <small>文</small></h1>
+<h1>FuMi-1 plus<small>文</small></h1>
+<p>An unofficial extension of <a href="https://github.com/cartesive/fumi-1/">Fumi-1</a></p>
+<p><strong>While playing with FuMi, I found myself wanting to switch on / off the various layers of a loop. I've changed the code so that while pressing on SEQ, you can switch on and off the various layers with the black keys (they light up to show if a layer is active or not). Similarly, I really wanted a MIDI out on the looper (each layer on its MIDI channel).</strong></p>
+
+<p><strong>Install at your own risk, I take not responsibility if something goes wrong.</strong> Tested on real hardware, works as expected.</p>
 <p class="lede">Custom firmware for the M-VAVE FM-1, inspired by the Suiko ST-50 (水光トレーナー), the Japanese
 poetry-accompaniment instrument. The sixteen white keys are the ST-50's lower row, mi fa la ti do three times
 and a top mi; the black keys its upper row or koto ornaments; the key is set in 本数; the tuning switches

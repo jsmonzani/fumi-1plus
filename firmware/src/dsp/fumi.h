@@ -73,6 +73,13 @@ void fm_loop_rec(void);                          /* the REC tap */
 void fm_loop_play(void);                         /* the PLAY tap */
 void fm_loop_undo(void);                         /* PLAY held: the top layer goes */
 void fm_loop_clear(void);                        /* REC held */
+/* layers (1.1.1): each layer can be switched on and off while the loop plays; a new layer is on, clear / restore turn
+ * every layer on. fm_loop_layer_toggle: layer 1.. (ignored if it does not exist). A layer off plays nothing and lets go
+ * of what it had down. fm_loop_layer_mask (UI): bit n is set when layer n + 1 exists and is on (the first 32 layers).
+ * The loop's notes go out in MIDI (P_MIDI_OUT) on their layer's channel: layer 1 channel 1 ... layer 16 channel 16,
+ * layer 17 channel 1 again; the keys played by hand stay on channel 1. */
+void fm_loop_layer_toggle(int layer);
+extern volatile uint32_t fm_loop_layer_mask;
 extern volatile uint8_t fm_loop_state, fm_loop_layers;                /* LP_*, layers recorded */
 extern volatile uint32_t fm_loop_pos, fm_loop_len, fm_loop_events;   /* position and length in blocks of 32; events */
 /* the loop as an image for the app's flash object (1.1.0): the events, the layers' instruments, the length.
