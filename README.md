@@ -1,7 +1,9 @@
+
 # FuMi-1 plus
-## Not available yet
+
 A small extension to [FuMi-1](https://github.com/cartesive/fumi-1/) by cartesive and not officially affiliated to the project.
 
+## What it adds 
 While playing with FuMi, I found myself wanting to switch on / off the various layers of a loop. I've changed the code so that while pressing on SEQ, you can switch on and off the various layers with the black keys (they light up to show if a layer is active or not).
 
 Similarly, I really wanted a MIDI out on the looper (each layer on its MIDI channel). 
