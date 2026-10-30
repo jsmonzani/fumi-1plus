@@ -1,0 +1,22 @@
+name: Deploy Subfolder to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main # Remplacez par master si votre branche principale s'appelle master
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: web/installer # Le chemin vers votre dossier
+          branch: gh-pages # La branche cible qui sera créée automatiquement
